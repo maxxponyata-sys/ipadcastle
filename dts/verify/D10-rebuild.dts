@@ -1,0 +1,253 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * iPhone 7 (D10) rebuilt on top of t8010-sandcastle.dtsi.
+ *
+ * Not shipped. build.sh compiles this and checks it is identical to the
+ * "D10" entry in Corellium's original dtbpack, which proves the shared SoC
+ * file was reconstructed correctly.
+ */
+
+/dts-v1/;
+
+#include "../t8010-sandcastle.dtsi"
+
+/ {
+	hardware-model = "D10";
+
+	memory@800000000 {
+		device_type = "memory";
+		reg = <0x8 0x00000000 0x0 0x80000000>;
+	};
+
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		boot_area@800010000 {
+			reg = <0x8 0x00010000 0x0 0x70000>;
+		};
+
+		fw_area@87d000000 {
+			reg = <0x8 0x7d000000 0x0 0x3000000>;
+			no-map;
+		};
+
+		pcie0_sart: pcie0_sart@87ee00000 {
+			compatible = "hx,nvme-scratch";
+			reg = <0x8 0x7ee00000 0x0 0x1200000>;
+			iova = <0xbc000000>;
+			no-map;
+		};
+	};
+
+	firmware {
+		android {
+			compatible = "android,firmware";
+			boot_devices = "0";
+
+			vbmeta {
+				compatible = "android,vbmeta";
+				parts = "vbmeta";
+			};
+
+			fstab {
+				compatible = "android,fstab";
+
+				system {
+					mnt_point = "/system";
+					dev = "system";
+					type = "ext4";
+					mnt_flags = "ro";
+					fsmgr_flags = "wait,logical";
+					status = "ok";
+				};
+
+				vendor {
+					mnt_point = "/vendor";
+					dev = "vendor";
+					type = "ext4";
+					mnt_flags = "ro";
+					fsmgr_flags = "wait,logical";
+					status = "ok";
+				};
+			};
+		};
+	};
+
+	soc {
+		dsiclk: dsiclk@20e0802c0 {
+			compatible = "hx,pmgr-clk-gate";
+			#clock-cells = <0>;
+			reg = <0x2 0x0e0802c0 0x0 0x8>;
+			clocks = <&refclk100mhz>;
+			clock-output-names = "dsiclk";
+		};
+
+		mipi_dsi: mipi_dsi@206600000 {
+			compatible = "hx,mipi-dsi";
+			reg = <0x2 0x06600000 0x0 0x100000>, <0x2 0x06400000 0x0 0x1000>,
+			      <0x2 0x0e0802c0 0x0 0x4>;
+			clocks = <&dsiclk>;
+			reset-gpios = <&gpio 0xac 0>;
+			supply-name = "lcd_ldo";
+		};
+	};
+
+	usbcomplex {
+	};
+
+	gpio-keys {
+		compatible = "gpio-keys";
+
+		volup {
+			label = "Volume Up";
+			gpios = <&gpio 0x17 1>;
+			linux,code = <0x73>;
+		};
+
+		voldown {
+			label = "Volume Down";
+			gpios = <&gpio 0xb4 1>;
+			linux,code = <0x72>;
+		};
+
+		ringerab {
+			label = "Ringer AB";
+			gpios = <&gpio 0x56 1>;
+			linux,code = <0x71>;
+		};
+
+		hold {
+			label = "Hold";
+			gpios = <&gpio 0xb3 1>;
+			linux,code = <0x74>;
+		};
+	};
+};
+
+&uart1 {
+	bluetooth {
+		compatible = "brcm,bcm4345c5";
+		device-wakeup-gpios = <&gpio 0x57 0>;
+		host-wakeup-gpios = <&pmu_gpio 0xb 0>;
+		shutdown-gpios = <&pmu_gpio 0x8 0>;
+		max-speed = <1500000>;
+	};
+};
+
+&uart5 {
+	gas_gauge {
+		compatible = "ti,bq27545-hdquart";
+		charger = <&charger>;
+	};
+};
+
+&i2c0 {
+	disp_pmu@27 {
+		compatible = "hx,pmu-chestnut";
+		reg = <0x27>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		touch_ldo: touch_ldo@5 {
+			compatible = "hx,i2c-pmu-switch";
+			reg = <0x5>;
+			mask = <0x10>;
+			enable = <0x10>;
+			supply-name = "mipi_dsi";
+		};
+
+		lcd_ldo@5 {
+			compatible = "hx,i2c-pmu-switch";
+			reg = <0x5>;
+			mask = <0xf>;
+			enable = <0xf>;
+		};
+	};
+
+	lm3539@62 {
+		compatible = "dwi,lm3539";
+		reg = <0x62>;
+		dwi = <&dwi>;
+		lcd-supply = <&mipi_dsi>;
+	};
+};
+
+&i2c1 {
+	pmu@74 {
+		compatible = "hx,pmu-d2333";
+		reg = <0x74>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		bbram: bbram@5000 {
+			compatible = "hx,i2c-pmu-bbram";
+			reg = <0x5000>;
+			size = <0x40>;
+		};
+
+		rtc@502 {
+			compatible = "hx,i2c-pmu-rtc";
+			reg = <0x502>;
+			nvmem = <&bbram>;
+			nvmem-offset = <0x4>;
+		};
+
+		touch_pwrsw: touch_pwrsw@31f {
+			compatible = "hx,i2c-pmu-switch";
+			reg = <0x31f>;
+			mask = <0x1>;
+			enable = <0x1>;
+		};
+
+		pmu_gpio: pmu_gpio@900 {
+			compatible = "hx,i2c-pmu-gpio";
+			reg = <0x900>;
+			reg-offs = <0x0 0x2 0x4 0x6 0x8 0xa 0xc 0xe 0x10 0x12 0x14 0x16 0x18 0x1a 0x1c 0x1e 0x20 0x27 0x2d 0x33 0x39>;
+			reg-input = <0x186>;
+			bit-outval = <0x1 0x1>;
+			bit-direction = <0xc0 0x0 0x80>;
+			gpio-controller;
+			#gpio-cells = <2>;
+			gpio-base = <0xe0>;
+		};
+	};
+
+	charger: sn2400@75 {
+		compatible = "charger,sn2400";
+		reg = <0x75>;
+		charge-current = <0x79e>;
+	};
+};
+
+&spi2 {
+	touch@0 {
+		compatible = "hx,touch";
+		reg = <0x0>;
+		spi-max-frequency = <3000000>;
+		hv-supply = <&touch_ldo>;
+		core-supply = <&touch_pwrsw>;
+		reset-gpios = <&gpio 0xa1 0>;
+		cs-gpios = <&gpio 0x51 0>;
+		irq-gpios = <&gpio 0xa6 1>;
+		clocks = <&touchclk>;
+	};
+};
+
+&spi1 {
+	cs-gpios = <&gpio 0x83 0>, <&gpio 0xb1 0>;
+};
+
+&pcie {
+	sart-regions = <&pcie0_sart>;
+	devpwr-gpios = <&gpio 0x58 0>, <&pmu_gpio 0xa 0>;
+	devpwr-on-0;
+	devpwr-on-3 = <0x0 0x0 0x1 0x0 0x0 0x1 0x1 0x1>;
+	/delete-property/ status;
+};
+
+&reboot {
+	nvmem = <&bbram>;
+	nvmem-poweroff = <0x1 0xff 0x0 0x2 0xff 0x0 0x3 0xff 0x0 0xf 0xf0 0x90>;
+};

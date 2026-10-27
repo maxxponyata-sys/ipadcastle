@@ -1,0 +1,37 @@
+#!/bin/sh
+# IpadCastle Windows overlay: replaces Sandcastle's /etc/network/usb0-up.
+# The original exposes a CDC ECM gadget, which Windows has no driver for.
+# This one exposes RNDIS with Microsoft OS descriptors, so Windows binds its
+# built-in RNDIS driver by itself. The interface is still usb0, so
+# /etc/network/interfaces (172.16.1.1/24) is unchanged.
+G=/config/usb_gadget/g1
+mkdir $G
+# Linux Foundation "Multifunction Composite Gadget": no Windows driver claims
+# it by ID, so Windows falls through to the OS descriptors below. (Google's
+# 18d1 IDs get grabbed by the Android ADB driver if it is installed.)
+echo "0x1d6b" > $G/idVendor
+echo "0x0104" > $G/idProduct
+echo "0x0223" > $G/bcdDevice
+echo "0x200" > $G/bcdUSB
+echo "0xEF" > $G/bDeviceClass
+echo "0x02" > $G/bDeviceSubClass
+echo "0x01" > $G/bDeviceProtocol
+mkdir $G/strings/0x409
+echo "SANDCASTLE-IPAD6" > $G/strings/0x409/serialnumber
+echo "IpadCastle" > $G/strings/0x409/manufacturer
+echo "iPad 6 Linux" > $G/strings/0x409/product
+
+echo 1 > $G/os_desc/use
+echo 0xcd > $G/os_desc/b_vendor_code
+echo MSFT100 > $G/os_desc/qw_sign
+
+mkdir $G/functions/rndis.gs0
+echo RNDIS > $G/functions/rndis.gs0/os_desc/interface.rndis/compatible_id
+echo 5162001 > $G/functions/rndis.gs0/os_desc/interface.rndis/sub_compatible_id
+
+mkdir $G/configs/b.1
+ln -s $G/functions/rndis.gs0 $G/configs/b.1/f1
+ln -s $G/configs/b.1 $G/os_desc
+echo "20c100000.usbdev" > $G/UDC
+
+exit 0

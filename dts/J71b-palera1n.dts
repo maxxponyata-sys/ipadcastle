@@ -1,0 +1,58 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * iPad 6 tree for the palera1n route (iPadOS 15-17): booted by shim/ via
+ * pongoOS "bootr" instead of checkra1n's Linux loader.
+ *
+ * checkra1n's loader added the framebuffer node itself; here the shim fills
+ * the 0x1ca5000N placeholder cells (and the "ICFMT" string) from iBoot's
+ * boot_args at boot time. Memory size is exact too, so the 128 MiB fw_area
+ * guess from ipad6.dtsi is not needed: everything above physBase + memSize
+ * (iBoot carve-outs, framebuffer) is simply not declared as RAM.
+ *
+ * Used for both J71b (Wi-Fi) and J72b (Cellular); the trees only differ in
+ * hardware-model, and the cellular modem is not used.
+ */
+
+/dts-v1/;
+
+#include "ipad6.dtsi"
+
+/ {
+	hardware-model = "J71b";
+
+	/* Optional initramfs overlay from the payload (see shim.c). Both are 0
+	 * when there is none, and the kernel then ignores them. */
+	chosen {
+		linux,initrd-start = <0x1ca5000a 0x1ca5000b>;
+		linux,initrd-end = <0x1ca5000c 0x1ca5000d>;
+	};
+
+	memory@800000000 {
+		reg = <0x8 0x00000000 0x1ca50001 0x1ca50002>;
+	};
+
+	reserved-memory {
+		/delete-node/ fw_area@878000000;
+
+		framebuffer_area {
+			reg = <0x1ca50003 0x1ca50004 0x1ca50005 0x1ca50006>;
+			no-map;
+		};
+	};
+
+	framebuffer {
+		compatible = "simple-framebuffer";
+		reg = <0x1ca50003 0x1ca50004 0x1ca50005 0x1ca50006>;
+		width = <0x1ca50007>;
+		height = <0x1ca50008>;
+		stride = <0x1ca50009>;
+		format = "ICFMT______";
+		status = "okay";
+	};
+};
+
+/* Touch report protocol, set by the shim from the payload header
+ * (load-linux.py --touch-gen); 2 when not given. */
+&touch {
+	generation = <0x1ca5000e>;
+};

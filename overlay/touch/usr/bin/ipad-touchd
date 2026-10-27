@@ -1,0 +1,615 @@
+#!/usr/bin/python
+# -*- coding: utf-8 -*-
+"""ipad-touchd: boot the iPad 6 multitouch controller for Sandcastle's
+hx-touch driver.
+
+Corellium's hx-touchd only knows the iPhone 7 / iPod touch 7 firmware. The
+iPad 6 (J71b, personality K1F19,4) uses the same Z2 SPI protocol, but its
+firmware is one preconstructed blob in "K1HBPP14" packets (a zero word
+before each packet's checksum) and its calibration and boot sequences come
+from the firmware's own config. This follows hx-touchd's bootload() and
+GEN_2 path with those differences.
+
+    ipad-touchd                 load firmware, hand the controller to the kernel
+    ipad-touchd --dump          load firmware, then print raw touch packets
+    ipad-touchd -v              log every SPI exchange
+
+Files (put in place by IpadCastle's overlay and boot loader):
+    /usr/share/firmware/multitouch/J71b.fw    the "Constructed Firmware" blob
+    /usr/share/firmware/multitouch/J71b.json  calibration and boot sequences
+    /etc/hw/touch-cal/<provider>.bin          calibration from the Apple DT
+
+Runs on the ramdisk's Python 2.7; also Python 3.
+"""
+from __future__ import print_function
+
+import argparse
+import fcntl
+import glob
+import json
+import os
+import struct
+import sys
+import time
+
+DEV = "/dev/hx-touch"
+FW_DIR = "/usr/share/firmware/multitouch"
+CAL_DIR = "/etc/hw/touch-cal"
+GPIO_SYSFS = "/sys/class/gpio"
+
+# Apple DT multi-touch power-sequence: function-power_ana, then
+# function-power_ldo. The kernel has no regulator-fixed driver, so these are
+# switched here instead of by the hx-touch driver.
+POWER_GPIOS = ((0x91, "power_ana"), (0x1d, "power_ldo"))
+GPIO_PINS = 0xd0  # Apple DT "#gpio-pins" of arm-io/gpio
+
+# drivers/input/touchscreen/hx-touch.c
+HXT_IOC_SET_CS = 0x40046801     # _IOW('h', 1, u32), arg 1 = assert CS#
+HXT_IOC_RESET = 0x6802          # _IO('h', 2)
+HXT_IOC_READY = 0x6803          # _IO('h', 3): kernel reads reports from now on
+HXT_IOC_SETUP_IRQ = 0x6804      # _IO('h', 4)
+HXT_IOC_WAIT_IRQ = 0x40046805   # _IOW('h', 5, u32), arg = ms
+HXT_IOC_METRICS = 0x40106806    # _IOW('h', 6, struct hxt_metrics)
+MAX_DATA_CHUNK = 16384
+
+MT_CMD_LAST = 0xE1
+MT_REP_INFO = 0xE3
+MT_CTRL_WRITE_SHORT = 0xE4
+MT_CTRL_READ_SHORT = 0xE6
+MT_CTRL_READ_LONG = 0xE7
+MT_SPI_Z2_WAKE_CMD = 0xEE
+
+log_file = None
+verbose = False
+
+
+def log(*a):
+    msg = " ".join(str(x) for x in a)
+    print(msg)
+    sys.stdout.flush()
+    if log_file:
+        log_file.write(time.strftime("%H:%M:%S ") + msg + "\n")
+        log_file.flush()
+
+
+def hexs(b, limit=48):
+    b = bytearray(b)
+    s = " ".join("%02x" % c for c in b[:limit])
+    return s + (" ... (%d bytes)" % len(b) if len(b) > limit else "")
+
+
+# --- packets -----------------------------------------------------------------
+
+def xe32(v):
+    """32-bit value in the controller's mixed byte order (mtfw_put32xe)."""
+    return bytearray([(v >> 8) & 255, v & 255, (v >> 24) & 255, (v >> 16) & 255])
+
+
+def be16(v):
+    return bytearray([(v >> 8) & 255, v & 255])
+
+
+def swap16(data):
+    """mtfw_copy16be: payload bytes are swapped in 16-bit pairs."""
+    data = bytearray(data)
+    if len(data) & 1:
+        data.append(0)
+    out = bytearray(len(data))
+    out[0::2], out[1::2] = data[1::2], data[0::2]
+    return out
+
+
+def load_packet(addr, data, fmt="hbpp14"):
+    """Memory load packet (18E1 3001). "z2" is hx-touchd's layout (iPhone 7);
+    "hbpp14" adds the zero word before the checksum that the iPad firmware
+    blob has."""
+    data = bytearray(data)
+    words = (len(data) + 3) // 4
+    hdr = bytearray([0x18, 0xE1, 0x30, 0x01]) + be16(words) + xe32(addr)
+    hdr += be16(sum(hdr[4:10]) & 0xFFFF)
+    body = swap16(data + bytearray(words * 4 - len(data)))[:words * 4]
+    pad = bytearray(4) if fmt == "hbpp14" else bytearray()
+    return hdr + body + pad + xe32(sum(data) & 0xFFFFFFFF)
+
+
+def regwr_packet(addr, mask, val):
+    """Masked register write (mtfw_item_add_regwr)."""
+    b = bytearray([0x1E, 0x33]) + xe32(addr) + xe32(mask) + xe32(val)
+    return b + be16(sum(b[2:14]) & 0xFFFF)
+
+
+# --- power ---------------------------------------------------------------------
+
+def gpio_base():
+    """sysfs number of pin 0 of the SoC GPIO block (the chip with the most
+    lines, at least #gpio-pins)."""
+    best = None
+    for chip in glob.glob(os.path.join(GPIO_SYSFS, "gpiochip*")):
+        n = int(open(os.path.join(chip, "ngpio")).read())
+        base = int(open(os.path.join(chip, "base")).read())
+        label = open(os.path.join(chip, "label")).read().strip()
+        if n >= GPIO_PINS and (best is None or n > best[1]):
+            best = (base, n, label)
+    if best is None:
+        raise IOError("no GPIO chip with %d lines in %s (CONFIG_GPIO_SYSFS?)" % (GPIO_PINS, GPIO_SYSFS))
+    return best
+
+
+def gpio_out(num, value):
+    path = os.path.join(GPIO_SYSFS, "gpio%d" % num)
+    if not os.path.exists(path):
+        open(os.path.join(GPIO_SYSFS, "export"), "w").write(str(num))
+    # "high"/"low" sets direction and level in one step, without a glitch
+    open(os.path.join(path, "direction"), "w").write("high" if value else "low")
+
+
+def power(on):
+    base, n, label = gpio_base()
+    seq = POWER_GPIOS if on else tuple(reversed(POWER_GPIOS))
+    for pin, name in seq:
+        gpio_out(base + pin, on)
+        log("%s (GPIO %#x = sysfs %d on %s) %s" % (name, pin, base + pin, label, "on" if on else "off"))
+        time.sleep(0.005)
+
+
+# --- /dev/hx-touch -------------------------------------------------------------
+
+class Touch(object):
+    def __init__(self):
+        self.fd = os.open(DEV, os.O_RDWR)
+
+    def close(self):
+        os.close(self.fd)
+
+    def ioctl(self, req, arg=0):
+        return fcntl.ioctl(self.fd, req, arg)
+
+    def cs(self, on):
+        self.ioctl(HXT_IOC_SET_CS, 1 if on else 0)
+        if on:
+            time.sleep(0.001)
+
+    def xfer(self, data):
+        """Full-duplex SPI: write, then read back what came in."""
+        data = bytes(bytearray(data))
+        rx = bytearray()
+        for i in range(0, len(data), MAX_DATA_CHUNK):
+            chunk = data[i:i + MAX_DATA_CHUNK]
+            if os.write(self.fd, chunk) != len(chunk):
+                raise IOError("short SPI write")
+            got = bytearray()
+            while len(got) < len(chunk):
+                r = os.read(self.fd, len(chunk) - len(got))
+                if not r:
+                    raise IOError("short SPI read")
+                got += bytearray(r)
+            rx += got
+        if verbose:
+            log("  spi tx", hexs(data), "\n         rx", hexs(rx))
+        return rx
+
+    def framed(self, data):
+        """One transaction with CS# asserted around it."""
+        self.cs(True)
+        try:
+            return self.xfer(data)
+        finally:
+            self.cs(False)
+
+    def wait_irq(self, ms):
+        try:
+            self.ioctl(HXT_IOC_WAIT_IRQ, ms)
+            return True
+        except IOError:
+            return False
+
+    # hx-touchd send_z2(): 16-byte command, checksum in bytes 14-15 (LE)
+    def z2(self, cmd=None):
+        cmd = bytearray(cmd or bytearray(16))
+        cmd += bytearray(16 - len(cmd))
+        s = sum(cmd[:14])
+        cmd[14], cmd[15] = s & 255, (s >> 8) & 255
+        rsp = self.framed(cmd)
+        time.sleep(0.001)
+        return rsp
+
+
+# --- boot ----------------------------------------------------------------------
+
+def bootload(t, items):
+    """hx-touchd bootload(): wake the boot ROM, then send each item."""
+    t.ioctl(HXT_IOC_RESET)
+    log("reset 1: probe rx", hexs(t.xfer(bytearray(4))))
+    time.sleep(0.001)
+    t.ioctl(HXT_IOC_SETUP_IRQ)
+    t.ioctl(HXT_IOC_RESET)
+    if t.wait_irq(500):
+        log("boot ROM raised its IRQ after reset: the controller is alive")
+    else:
+        log("WARNING: no boot IRQ within 500 ms (controller off, or wrong IRQ pin)")
+    log("boot ROM hello rx", hexs(t.framed(bytearray(4))))
+
+    for i, (kind, data, what) in enumerate(items):
+        if i == len(items) - 1:
+            # The last item starts the firmware; catch the IRQ it raises
+            # once it is up (Boot Timeout in the config: 500 ms, 5 s first).
+            t.ioctl(HXT_IOC_SETUP_IRQ)
+        rx = t.framed(data)
+        line = "%-34s %7d bytes, rx tail %s" % (what, len(data), hexs(rx[-8:]))
+        if kind == "ack":
+            ack = t.framed(bytearray([0x1A, 0xA1]))
+            line += ", ack %s" % hexs(ack)
+            time.sleep(0.001)
+        log(line)
+    start = time.time()
+    if t.wait_irq(5000):
+        log("firmware raised its IRQ %d ms after start: it is running" % ((time.time() - start) * 1000))
+    else:
+        log("WARNING: no IRQ from the firmware within 5 s")
+    time.sleep(0.05)
+
+
+def build_items(cfg, fw, cal_fmt, zero_cal):
+    items = [("write", bytearray([0x1A, 0xA1, 0x18, 0xE1]), "prelude 1AA1 18E1")]
+    items.append(("ack", fw, "firmware " + cfg.get("firmware_version", "")))
+    for c in cfg["calibration"]:
+        path = os.path.join(CAL_DIR, c["provider"] + ".bin")
+        if os.path.exists(path):
+            data = bytearray(open(path, "rb").read())
+            src = path
+        elif zero_cal:
+            data, src = bytearray(c["max_size"]), "zeroes"
+        else:
+            log("calibration %s: missing (%s), skipped" % (c["provider"], path))
+            continue
+        if len(data) > c["max_size"]:
+            log("calibration %s: %d bytes, more than %d; truncated" % (c["provider"], len(data), c["max_size"]))
+            data = data[:c["max_size"]]
+        items.append(("ack", load_packet(c["address"], data, cal_fmt),
+                      "cal %s @%#x from %s" % (c["provider"], c["address"], src)))
+    for b in cfg["boot"]:
+        if "action" in b:
+            if b["action"] == "RequestCalibration":
+                items.append(("ack", bytearray([0x1F, 0x01]), "RequestCalibration"))
+            else:
+                log("boot action %s unknown, skipped" % b["action"])
+            continue
+        mask = b.get("mask", 0xFFFFFFFF)
+        items.append(("ack", regwr_packet(b["address"], mask, b["value"]),
+                      "regwr %#010x mask %#x = %#x" % (b["address"], mask, b["value"])))
+    return items
+
+
+def read_report(t, rpt, maxlen, mt_type):
+    """hx-touchd read_report(). mt_type 1 sends a real read command while
+    clocking the data out, 2 sends 0xA5 filler."""
+    cmd = bytearray([MT_REP_INFO, rpt]) + bytearray(14)
+    t.z2(cmd)
+    rsp = t.z2(cmd)
+    if rsp[2]:
+        return None, rsp
+    length = rsp[3] | (rsp[4] << 8)
+    rlen = min(length, maxlen)
+    if rlen <= 11:
+        cmd[0] = MT_CTRL_READ_SHORT
+        t.z2(cmd)
+        cmd[0], cmd[1] = MT_CMD_LAST, 0
+        rsp = t.z2(cmd)
+        return rsp[3:3 + rlen], rsp
+    cmd[0] = MT_CTRL_READ_LONG
+    cmd[3], cmd[4] = rlen & 255, rlen >> 8
+    t.z2(cmd)
+    if mt_type == 1:
+        pbuf = bytearray(rlen + 5)
+        pbuf[0:5] = bytearray([MT_CTRL_READ_LONG, rpt, 1, rlen & 255, rlen >> 8])
+        s = sum(pbuf[:rlen + 3])
+        pbuf[rlen + 3], pbuf[rlen + 4] = s & 255, (s >> 8) & 255
+    else:
+        pbuf = bytearray([0xA5]) * (rlen + 5)
+    pbuf = t.framed(pbuf)
+    return pbuf[3:3 + rlen], pbuf
+
+
+def write_report(t, rpt, data):
+    cmd = bytearray([MT_CTRL_WRITE_SHORT, rpt, len(data)]) + bytearray(data)
+    t.z2(cmd)
+    t.z2(bytearray([MT_CMD_LAST]))
+
+
+def metrics_from_d9(d9, layout):
+    """(left, right, top, bottom) from report D9. "iphone" is hx-touchd's
+    reading. On the iPad 6, D9 holds the panel size in 1/100 mm at 0 and 4
+    (147.45 x 196.58 mm) and min x, min y, max x, max y at 8..15."""
+    if d9 is None or len(d9) < 16:
+        return None
+    s16 = lambda o: struct.unpack_from("<h", bytes(d9), o)[0]
+    if layout == "ipad":
+        m = (s16(8), s16(12), s16(10), s16(14))
+    else:
+        m = (s16(8), s16(12), s16(14), s16(10))
+    if m[0] == m[1] or m[2] == m[3] or bytearray(d9[8:16]) in (bytearray(8), bytearray(b"\xff" * 8)):
+        return None
+    return m
+
+
+IRQ_PIN = 0x15  # Apple DT multi-touch interrupts = <0x15>
+
+
+def irq_level():
+    """'lo'/'hi' of the touch IRQ line from /sys/kernel/debug/gpio (the pin
+    belongs to the kernel driver, so sysfs can't export it)."""
+    dbg = "/sys/kernel/debug/gpio"
+    if not os.path.exists(dbg):
+        os.system("mount -t debugfs none /sys/kernel/debug 2>/dev/null")
+    try:
+        num = gpio_base()[0] + IRQ_PIN
+        for line in open(dbg):
+            f = line.split()
+            if f and f[0] == "gpio-%d" % num:
+                return "lo" if " lo" in line else "hi" if " hi" in line else "?"
+    except (IOError, OSError):
+        pass
+    return "?"
+
+
+def read_packet(t, gen, tag):
+    """One report read, as hx_touch_read_report() does it."""
+    pkt = bytearray(16)
+    pkt[0], pkt[1], pkt[14] = 0xEB, 1 + tag, 0xEC + tag
+    first = t.framed(pkt)
+    if gen == 1:
+        second = bytearray(16)
+        second[0:3] = bytearray([0xEB, 1 + tag, 1])
+    else:
+        second = bytearray([0xA5]) * 64
+    return first, t.framed(second)
+
+
+def read_frame(t, tag):
+    """One report, as hx_touch_read_report() does it for generation 2:
+    a 16-byte read command, then 64 bytes of 0xA5 filler and the rest of the
+    packet under one CS#. Returns the payload (without checksum) or None."""
+    pkt = bytearray(16)
+    pkt[0], pkt[1], pkt[14] = 0xEB, 1 + tag, 0xEC + tag
+    t.framed(pkt)
+    t.cs(True)
+    try:
+        head = t.xfer(bytearray([0xA5]) * 64)
+        length = head[2] | (head[3] << 8)
+        if (head[0] & 0xFE) != 0xEA or head[1] != 1 + tag or sum(head[:5]) & 0xFF or not 2 < length <= 326:
+            return None
+        data = head[5:]
+        if length > 59:
+            data += t.xfer(bytearray(length - 59))
+    finally:
+        t.cs(False)
+    data = data[:length]
+    if (sum(data[:-2]) & 0xFFFF) != (data[-2] | (data[-1] << 8)):
+        return None
+    return data[:-2]
+
+
+def parse_touches(data):
+    """iPad 6 touch frame: 90 03 ..., [26] = number of touches, then 48-byte
+    records from [36]: finger id, state (3 = new, 4 = down, 5+ = lifting),
+    float32 x and y in micrometres. None for other report types."""
+    if data is None or len(data) < 36 or data[0] != 0x90 or data[1] != 0x03:
+        return None
+    touches = []
+    for i in range(data[26]):
+        o = 36 + 48 * i
+        if o + 12 > len(data):
+            break
+        x, y = struct.unpack_from("<ff", bytes(data), o + 4)
+        touches.append((data[o], data[o + 1], x, y))
+    return touches
+
+
+class XPointer(object):
+    """Moves the X pointer and button 1 through XTest (the kernel has no
+    uinput, and the hx-touch driver can't parse iPad frames)."""
+
+    def __init__(self, display=b":0"):
+        import ctypes
+        self.x11 = ctypes.CDLL("libX11.so.6")
+        self.xtst = ctypes.CDLL("libXtst.so.6")
+        self.x11.XOpenDisplay.restype = ctypes.c_void_p
+        self.x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+        for f in (self.x11.XFlush, self.x11.XDefaultScreen):
+            f.argtypes = [ctypes.c_void_p]
+        self.x11.XDisplayWidth.argtypes = self.x11.XDisplayHeight.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        self.xtst.XTestFakeMotionEvent.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_ulong]
+        self.xtst.XTestFakeButtonEvent.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_int, ctypes.c_ulong]
+        self.dpy = None
+        while not self.dpy:
+            self.dpy = self.x11.XOpenDisplay(display)
+            if not self.dpy:
+                time.sleep(1)
+        scr = self.x11.XDefaultScreen(self.dpy)
+        self.width = self.x11.XDisplayWidth(self.dpy, scr)
+        self.height = self.x11.XDisplayHeight(self.dpy, scr)
+        self.down = False
+
+    def update(self, x, y, down):
+        self.xtst.XTestFakeMotionEvent(self.dpy, -1, int(x), int(y), 0)
+        if down != self.down:
+            self.xtst.XTestFakeButtonEvent(self.dpy, 1, 1 if down else 0, 0)
+            self.down = down
+        self.x11.XFlush(self.dpy)
+
+
+def run_pointer(t, panel, args):
+    """Read touch frames in userspace and drive the X pointer with the first
+    finger. panel = (width, height) of the touch area in micrometres."""
+    log("waiting for X on :0")
+    ptr = XPointer()
+    log("X is up (%dx%d); touches move the pointer, a finger down is button 1" % (ptr.width, ptr.height))
+    tag, finger = 0, None
+    t.ioctl(HXT_IOC_SETUP_IRQ)
+    while True:
+        if t.wait_irq(10):
+            t.ioctl(HXT_IOC_SETUP_IRQ)
+        for _ in range(8):  # drain what is queued; edges can be missed
+            data = read_frame(t, tag)
+            if data is None:
+                break
+            tag ^= 1
+            touches = parse_touches(data)
+            if not touches:
+                continue
+            cur = [tch for tch in touches if tch[0] == finger] or touches[:1]
+            tid, state, x, y = cur[0]
+            if args.calib:
+                log("touch id %d state %d raw x %.0f y %.0f" % (tid, state, x, y))
+            down = state in (3, 4)
+            finger = tid if down else None
+            if args.swap_xy:
+                x, y = y, x
+            fx, fy = x / panel[0], y / panel[1]
+            if args.flip_x:
+                fx = 1 - fx
+            if args.flip_y:
+                fy = 1 - fy
+            ptr.update(min(max(fx, 0), 1) * (ptr.width - 1), min(max(fy, 0), 1) * (ptr.height - 1), down)
+
+
+def dump_packets(t, gen, seconds=12):
+    """Poll the controller (not only on IRQ edges, which can be missed if the
+    line is already low) and print every read that returns data, plus the
+    IRQ line level, to see what this firmware sends."""
+    log("dumping for %d s (read style %d); touch the screen now" % (seconds, gen))
+    tag, edges, reads, last_lvl, end = 0, 0, 0, None, time.time() + seconds
+    t.ioctl(HXT_IOC_SETUP_IRQ)
+    next_status = time.time()
+    while time.time() < end:
+        if t.wait_irq(20):
+            edges += 1
+            t.ioctl(HXT_IOC_SETUP_IRQ)
+        lvl = irq_level()
+        if lvl != last_lvl:
+            log("irq line %s" % lvl)
+            last_lvl = lvl
+        first, rx = read_packet(t, gen, tag)
+        reads += 1
+        if any(c not in (0x00, 0xFF) for c in bytearray(first[:5]) + bytearray(rx[:5])):
+            log("data: hdr %s\n      body %s" % (hexs(first), hexs(rx, 64)))
+            tag ^= 1
+        if time.time() >= next_status:
+            log("status: irq line %s, %d irq edges, %d reads" % (lvl, edges, reads))
+            next_status = time.time() + 2
+    log("dump done: %d irq edges, %d reads" % (edges, reads))
+
+
+def main():
+    global log_file, verbose
+    ap = argparse.ArgumentParser(description="iPad 6 touch firmware loader")
+    ap.add_argument("-v", "--verbose", action="store_true", help="log every SPI exchange")
+    ap.add_argument("--log", help="also append the log to this file")
+    ap.add_argument("--dump", action="store_true", help="print raw touch packets instead of handing over")
+    ap.add_argument("--cal-format", choices=("hbpp14", "z2"), default="hbpp14",
+                    help="calibration packet layout (default hbpp14, as in the firmware blob)")
+    ap.add_argument("--zero-cal", action="store_true", help="send zeroes for missing calibration")
+    ap.add_argument("--mt-type", type=int, choices=(1, 2), help="report read style (default: try both)")
+    ap.add_argument("--d9-layout", choices=("ipad", "iphone"), default="ipad",
+                    help="how to read the panel metrics in report D9 (default ipad)")
+    ap.add_argument("--kernel", action="store_true",
+                    help="hand reports to the hx-touch kernel driver (iPhone format only)")
+    ap.add_argument("--calib", action="store_true", help="log raw touch coordinates")
+    ap.add_argument("--swap-xy", action="store_true", help="swap touch axes")
+    ap.add_argument("--flip-x", action="store_true", help="mirror the X axis")
+    # The iPad 6 panel reports Y from the bottom edge (checked on hardware).
+    ap.add_argument("--no-flip-y", dest="flip_y", action="store_false",
+                    help="don't mirror the Y axis (mirrored by default)")
+    ap.add_argument("--fw", help="firmware JSON (default: the one in %s)" % FW_DIR)
+    args = ap.parse_args()
+    verbose = args.verbose
+    if args.log:
+        log_file = open(args.log, "a")
+
+    cfg_path = args.fw or (sorted(glob.glob(os.path.join(FW_DIR, "*.json"))) or [None])[0]
+    if not cfg_path:
+        log("no firmware in %s" % FW_DIR)
+        return 1
+    cfg = json.load(open(cfg_path))
+    fw = bytearray(open(os.path.join(os.path.dirname(cfg_path), cfg["firmware_file"]), "rb").read())
+    log("firmware %s (%s, %d bytes), personality %s" % (
+        cfg.get("firmware_version"), cfg.get("packet_type"), len(fw), cfg.get("personality")))
+    gen = 2
+    for p in glob.glob("/proc/device-tree/*/spi@20a08c000/touch@0/generation") + \
+            glob.glob("/proc/device-tree/spi@20a08c000/touch@0/generation"):
+        gen = struct.unpack(">I", open(p, "rb").read()[:4])[0]
+    log("kernel driver report protocol (device tree generation): %d" % gen)
+
+    items = build_items(cfg, fw, args.cal_format, args.zero_cal)
+    styles = [args.mt_type] if args.mt_type else [1, 2]
+
+    # The driver holds reset low from probe on, so power can come up first.
+    power(True)
+    time.sleep(0.01)
+    for attempt in range(3):
+        t = Touch()
+        log("--- attempt %d" % (attempt + 1))
+        bootload(t, items)
+        t.z2(bytearray([MT_SPI_Z2_WAKE_CMD]))
+        # Read D9 three rounds with each style: the first read right after
+        # boot can come back empty whatever the style, so judge by all rounds.
+        works, m = dict((s, []) for s in styles), None
+        for rnd in range(3):
+            for s in styles:
+                d9, raw = read_report(t, 0xD9, 16, s)
+                got = metrics_from_d9(d9, args.d9_layout)
+                works[s].append(bool(got))
+                if got and not m:
+                    m, good_d9 = got, d9
+                log("report D9 round %d, read style %d: %s  raw %s" % (
+                    rnd + 1, s, hexs(d9) if d9 is not None else "unsupported", hexs(raw, 24)))
+            time.sleep(0.1)
+        if m:
+            break
+        t.close()
+        time.sleep(1)
+    else:
+        log("touch controller did not come up; log above shows where it stopped")
+        power(False)
+        return 1
+
+    for s in styles:
+        log("read style %d: %s" % (s, " ".join("ok" if w else "empty" for w in works[s])))
+    good = [s for s in styles if any(works[s][1:])] or [s for s in styles if any(works[s])]
+    mt = gen if gen in good else good[0]
+    log("controller is up: report read style %d, metrics left %d right %d top %d bottom %d" % ((mt,) + m))
+    if gen not in good:
+        log("NOTE: reports need generation %d but the device tree says %d; "
+            "boot with --touch-gen %d (boot.cmd -TouchGen %d)" % (mt, gen, mt, mt))
+    t.ioctl(HXT_IOC_METRICS, struct.pack("<4i", *m))
+    log("irq line before enabling reports: %s" % irq_level())
+    write_report(t, 0xAF, b"\x00")
+    time.sleep(0.05)
+    log("irq line after report AF=00: %s" % irq_level())
+
+    if args.dump:
+        dump_packets(t, mt)
+        return 0
+    if args.kernel:
+        t.ioctl(HXT_IOC_READY)
+        log("handed over to the kernel driver; touches go to the 'Hx Capacitive TouchScreen' input device")
+        while True:
+            time.sleep(3600)
+    # D9 holds the panel size in 1/100 mm; touch frames are in micrometres.
+    d9_size = struct.unpack_from("<hxxh", bytes(good_d9[:6]), 0)
+    panel = (d9_size[0] * 10 or 147450, d9_size[1] * 10 or 196580)
+    log("touch area %d x %d um" % panel)
+    run_pointer(t, panel, args)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        pass
+    except Exception:
+        # The init script runs this in the background with no stderr, so put
+        # the traceback in the log.
+        import traceback
+        log("CRASH:\n" + traceback.format_exc())
+        sys.exit(1)

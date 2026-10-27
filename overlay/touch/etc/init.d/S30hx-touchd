@@ -1,0 +1,47 @@
+#!/bin/sh
+#
+# IpadCastle: starts ipad-touchd, which boots the iPad 6 touch controller.
+# Replaces Sandcastle's S30hx-touchd: Corellium's hx-touchd only knows the
+# iPhone 7 / iPod touch 7 firmware. Log: /var/log/ipad-touchd.log
+#
+
+PIDFILE=/var/run/ipad-touchd.pid
+
+start() {
+	# X reads touches from the hx-touch input device; its eventN number
+	# depends on probe order, so point xorg.conf at it before Xorg starts.
+	for e in /sys/class/input/event*; do
+		if [ "$(cat "$e/device/name" 2>/dev/null)" = "Hx Capacitive TouchScreen" ]; then
+			sed -i "s|\"/dev/input/event[0-9]*\"|\"/dev/input/${e##*/}\"|" /etc/X11/xorg.conf
+		fi
+	done
+	printf "Starting ipad-touchd: "
+	start-stop-daemon -S -b -q -m -p $PIDFILE \
+		--exec /usr/bin/python -- /usr/bin/ipad-touchd --log /var/log/ipad-touchd.log
+	[ $? = 0 ] && echo "OK" || echo "FAIL"
+}
+
+stop() {
+	printf "Stopping ipad-touchd: "
+	start-stop-daemon -K -q -p $PIDFILE
+	[ $? = 0 ] && echo "OK" || echo "FAIL"
+}
+
+case "$1" in
+  start)
+	start
+	;;
+  stop)
+	stop
+	;;
+  restart|reload)
+	stop
+	sleep 1
+	start
+	;;
+  *)
+	echo "Usage: $0 {start|stop|restart}"
+	exit 1
+esac
+
+exit $?

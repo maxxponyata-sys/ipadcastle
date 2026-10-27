@@ -1,0 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0
+/* Apple iPad 6 (Cellular), J72b, iPad7,6 (A1954) */
+
+/dts-v1/;
+
+#include "ipad6.dtsi"
+
+/ {
+	hardware-model = "J72b";
+};

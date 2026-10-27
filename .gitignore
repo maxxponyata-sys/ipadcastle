@@ -1,0 +1,10 @@
+# Build output: holds Corellium's kernel and Apple's touch firmware and
+# device trees, which aren't ours to redistribute. build.sh fetches them.
+out/
+
+# Compiled shim (prebuilt/ keeps the copy boot.sh uses)
+shim/*.bin
+shim/*.elf
+
+__pycache__/
+*.pyc

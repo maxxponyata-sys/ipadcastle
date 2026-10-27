@@ -1,0 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0
+/* Apple iPad 6 (Wi-Fi), J71b, iPad7,5 (A1893) */
+
+/dts-v1/;
+
+#include "ipad6.dtsi"
+
+/ {
+	hardware-model = "J71b";
+};

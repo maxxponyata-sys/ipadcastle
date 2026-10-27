@@ -1,0 +1,121 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Apple iPad 6 (J71b / J72b, A10 T8010) board for the Project Sandcastle
+ * kernel.
+ *
+ * What is known to match iPhone 7 (same SoC) and is enabled:
+ *   CPUs + cpufreq, AIC, GPIO, UARTs, PMGR clocks, I2C/SPI controllers,
+ *   USB device port (USB ethernet gadget), watchdog reboot, and the
+ *   framebuffer that pongoOS inserts (simple-framebuffer).
+ *
+ * Multitouch is enabled from the iPad's own Apple device tree
+ * (DeviceTree.j71bap, arm-io/spi3/multi-touch): every pin below is used by
+ * that node alone, and its power comes from two GPIOs, not from PMIC
+ * registers. ipad-touchd (overlay/touch) switches that power on and loads
+ * the controller's firmware.
+ *
+ * Board-level hardware whose wiring on iPad 6 is not known is NOT enabled,
+ * so the kernel never drives an unknown PMIC rail or GPIO:
+ *   - display PMU / MIPI-DSI panel power (iPad 6 uses eDP, not DSI;
+ *     iBoot leaves the panel and backlight on, simplefb draws to it)
+ *   - battery gauge, charger, PMU RTC
+ *   - PCIe (NVMe + Wi-Fi): endpoint power GPIOs and the NVMe SART carve-out
+ *     are board-specific; the root filesystem is the ramdisk baked into
+ *     Linux.lzma, so storage is not needed to boot.
+ *   - Bluetooth (UART1 child; GPIOs are board-specific)
+ *
+ * Button GPIOs are from the mainline Linux iPad 6 tree
+ * (arch/arm64/boot/dts/apple/t8010-ipad6.dtsi); the hx,gpio controller uses
+ * the same pin numbering as mainline's pinctrl_ap (same block, 0x20f100000).
+ */
+
+#include "t8010-sandcastle.dtsi"
+
+#define GPIO_ACTIVE_LOW 1
+#define KEY_HOME        102
+#define KEY_VOLUMEDOWN  114
+#define KEY_VOLUMEUP    115
+#define KEY_POWER       116
+
+/ {
+	/* iPad 6 has 2 GiB, same as iPhone 7. */
+	memory@800000000 {
+		device_type = "memory";
+		reg = <0x8 0x00000000 0x0 0x80000000>;
+	};
+
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		boot_area@800010000 {
+			reg = <0x8 0x00010000 0x0 0x70000>;
+		};
+
+		/*
+		 * iBoot's carve-out at the top of DRAM (firmware, framebuffer).
+		 * iPhone 7 reserves the top 48 MiB. The iPad 6 framebuffer is
+		 * 1536x2048x4 (12 MiB, ~3x the phone's), so reserve 128 MiB to
+		 * be safe. If the screen shows garbage after boot, the
+		 * framebuffer lies below this; raise the size.
+		 */
+		fw_area@878000000 {
+			reg = <0x8 0x78000000 0x0 0x08000000>;
+			no-map;
+		};
+	};
+
+	gpio-keys {
+		compatible = "gpio-keys";
+
+		home {
+			label = "Home";
+			gpios = <&gpio 180 GPIO_ACTIVE_LOW>;
+			linux,code = <KEY_HOME>;
+		};
+
+		hold {
+			label = "Hold";
+			gpios = <&gpio 179 GPIO_ACTIVE_LOW>;
+			linux,code = <KEY_POWER>;
+		};
+
+		voldown {
+			label = "Volume Down";
+			gpios = <&gpio 89 GPIO_ACTIVE_LOW>;
+			linux,code = <KEY_VOLUMEDOWN>;
+		};
+
+		volup {
+			label = "Volume Up";
+			gpios = <&gpio 90 GPIO_ACTIVE_LOW>;
+			linux,code = <KEY_VOLUMEUP>;
+		};
+	};
+};
+
+/* multi-touch "function-clock_enable" asks PMGR TCLK for 24 MHz (iPhone 7:
+ * 32768 Hz), i.e. divider 1 from the 24 MHz reference. */
+&touchclk {
+	clock-frequency = <24000000>;
+};
+
+&spi3 {
+	touch: touch@0 {
+		compatible = "hx,touch";
+		reg = <0x0>;
+		spi-max-frequency = <3000000>;
+		/* No hv-/core-supply: the Sandcastle kernel has no regulator-fixed
+		 * driver, so the driver gets dummy regulators and ipad-touchd
+		 * switches the two power GPIOs itself (power_ana 0x91, then
+		 * power_ldo 0x1d) through /sys/class/gpio. */
+		reset-gpios = <&gpio 0x1f 0>;	/* function-reset */
+		cs-gpios = <&gpio 0x55 0>;	/* function-enable_cs */
+		irq-gpios = <&gpio 0x15 1>;	/* interrupts = <0x15> */
+		clocks = <&touchclk>;
+		/* Report read protocol: 1 as on iPod touch 7, 2 as on iPhone 7.
+		 * The palera1n tree lets the shim set it at boot. */
+		generation = <2>;
+	};
+};

@@ -1,0 +1,483 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Apple A10 (T8010) SoC description for the Project Sandcastle kernel.
+ *
+ * Reconstructed from Corellium's released Sandcastle dtbpack (entry "D10",
+ * iPhone 7) and split into SoC-level parts (here) and board parts
+ * (ipad6.dtsi). Everything in this file sits inside the A10 itself and is
+ * identical on every T8010 device: CPUs, AIC, UARTs, PMGR clock gates,
+ * GPIO block, I2C/SPI controllers, PCIe root complex and USB device port.
+ *
+ * Board-level children (PMU, display power, touch, charger, Bluetooth,
+ * PCIe endpoint power GPIOs) are left out or disabled here and filled in by
+ * the board file, because they differ between iPhone 7 and iPad 6.
+ *
+ * Uses Corellium's "hx," bindings, so it only works with the Sandcastle
+ * kernel (Linux.lzma), not with mainline Linux.
+ */
+
+/ {
+	model = "Hx H9P phone";
+	compatible = "hx,h9p";
+	interrupt-parent = <&aic>;
+	#address-cells = <2>;
+	#size-cells = <2>;
+
+	aliases {
+		serial0 = &uart0;
+	};
+
+	chosen {
+		bootargs = "earlycon=hx_uart,0x20a0c0000 console=tty0 console=ttyHX0 selinux=1 enforcing=0 androidboot.selinux=permissive printk.devkmsg=on androidboot.hardware=ranchu";
+	};
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		cpu@0 {
+			device_type = "cpu";
+			compatible = "hx,v1";
+			reg = <0>;
+			enable-method = "hx,startcpu";
+		};
+
+		cpu@1 {
+			device_type = "cpu";
+			compatible = "hx,v1";
+			reg = <1>;
+			enable-method = "hx,startcpu";
+		};
+	};
+
+	refclk24mhz: refclk24mhz {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <24000000>;
+		clock-output-names = "refclk24mhz";
+	};
+
+	refclk100mhz: refclk100mhz {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <100000000>;
+		clock-output-names = "refclk100mhz";
+	};
+
+	timer {
+		compatible = "arm,armv8-timer";
+		interrupts = <1 1 0xf08>, <1 0 0xf08>;
+		clock-frequency = <24000000>;
+	};
+
+	soc {
+		compatible = "simple-bus";
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		hxstart@20e0d4004 {
+			compatible = "hx,startcpu";
+			reg = <0x2 0x0e0d4004 0x0 0x8>, <0x2 0x02050000 0x0 0x8>,
+			      <0x2 0x02030fb0 0x0 0x4>, <0x2 0x0e0d4004 0x0 0x8>,
+			      <0x2 0x02150000 0x0 0x8>, <0x2 0x02130fb0 0x0 0x4>;
+		};
+
+		cpufreq: cpufreq@202f20000 {
+			compatible = "hx,pmgr-cpufreq";
+			reg = <0x2 0x02f20000 0x0 0x1000>, <0x2 0x02f48000 0x0 0x1000>,
+			      <0x2 0x02f50000 0x0 0x1000>, <0x2 0x02f80000 0x0 0x1000>,
+			      <0x2 0x0e068000 0x0 0x1000>, <0x2 0x0e09c000 0x0 0x1000>,
+			      <0x2 0x0e0a0000 0x0 0x1000>, <0x2 0x0e0c8000 0x0 0x1000>;
+		};
+
+		i2c0clk: i2c0clk@20e0801a8 {
+			compatible = "hx,pmgr-clk-gate";
+			#clock-cells = <0>;
+			reg = <0x2 0x0e0801a8 0x0 0x8>;
+			clocks = <&refclk24mhz>;
+			clock-output-names = "i2c0clk";
+		};
+
+		i2c1clk: i2c1clk@20e0801b0 {
+			compatible = "hx,pmgr-clk-gate";
+			#clock-cells = <0>;
+			reg = <0x2 0x0e0801b0 0x0 0x8>;
+			clocks = <&refclk24mhz>;
+			clock-output-names = "i2c1clk";
+		};
+
+		i2c2clk: i2c2clk@20e0801b8 {
+			compatible = "hx,pmgr-clk-gate";
+			#clock-cells = <0>;
+			reg = <0x2 0x0e0801b8 0x0 0x8>;
+			clocks = <&refclk24mhz>;
+			clock-output-names = "i2c2clk";
+		};
+
+		i2c3clk: i2c3clk@20e0801c0 {
+			compatible = "hx,pmgr-clk-gate";
+			#clock-cells = <0>;
+			reg = <0x2 0x0e0801c0 0x0 0x8>;
+			clocks = <&refclk24mhz>;
+			clock-output-names = "i2c3clk";
+		};
+
+		spi0clk: spi0clk@20e0801c8 {
+			compatible = "hx,pmgr-clk-gate";
+			#clock-cells = <0>;
+			reg = <0x2 0x0e0801c8 0x0 0x8>;
+			clocks = <&refclk24mhz>;
+			clock-output-names = "spi0clk";
+		};
+
+		spi1clk: spi1clk@20e0801d0 {
+			compatible = "hx,pmgr-clk-gate";
+			#clock-cells = <0>;
+			reg = <0x2 0x0e0801d0 0x0 0x8>;
+			clocks = <&refclk24mhz>;
+			clock-output-names = "spi1clk";
+		};
+
+		spi2clk: spi2clk@20e0801d8 {
+			compatible = "hx,pmgr-clk-gate";
+			#clock-cells = <0>;
+			reg = <0x2 0x0e0801d8 0x0 0x8>;
+			clocks = <&refclk24mhz>;
+			clock-output-names = "spi2clk";
+		};
+
+		spi3clk: spi3clk@20e0801e0 {
+			compatible = "hx,pmgr-clk-gate";
+			#clock-cells = <0>;
+			reg = <0x2 0x0e0801e0 0x0 0x8>;
+			clocks = <&refclk24mhz>;
+			clock-output-names = "spi3clk";
+		};
+
+		pcieclk: pcieclk@20e080318 {
+			compatible = "hx,pmgr-clk-gate";
+			#clock-cells = <0>;
+			reg = <0x2 0x0e080318 0x0 0x8>, <0x6 0x00010000 0x0 0x8000>;
+			clocks = <&refclk100mhz>;
+			clock-output-names = "pcieclk";
+			post-up = <0x1 0x0 0x7 0x1 0xc 0x80010005 0x1 0x4104 0x3 0x1 0x4100 0x3>;
+		};
+
+		pcierefclk: pcierefclk@20e080148 {
+			compatible = "hx,pmgr-clk-gate";
+			#clock-cells = <0>;
+			reg = <0x2 0x0e080148 0x0 0x8>;
+			clocks = <&refclk100mhz>;
+			clock-output-names = "pcierefclk";
+		};
+
+		pcieauxclk: pcieauxclk@20e080320 {
+			compatible = "hx,pmgr-clk-gate";
+			#clock-cells = <0>;
+			reg = <0x2 0x0e080320 0x0 0x8>;
+			clocks = <&refclk100mhz>;
+			clock-output-names = "pcieauxclk";
+		};
+
+		usbclk: usbclk@20e080268 {
+			compatible = "hx,pmgr-clk-gate";
+			#clock-cells = <0>;
+			reg = <0x2 0x0e080268 0x0 0x8>, <0x2 0x0cb00000 0x0 0x20>;
+			clocks = <&refclk24mhz>;
+			clock-output-names = "usbclk";
+			post-up = <0x1 0x0 0x0 0x1 0x4 0x0 0x1 0x8 0x3f3f 0x1 0xc 0x3f3f 0x1 0x10 0x10c>;
+		};
+
+		usbdevclk: usbdevclk@20e080270 {
+			compatible = "hx,pmgr-clk-gate";
+			#clock-cells = <0>;
+			reg = <0x2 0x0e080270 0x0 0x8>, <0x2 0x0c900000 0x0 0x100>;
+			clocks = <&usbclk>;
+			clock-output-names = "usbdevclk";
+			post-up = <0x1 0x1c 0x108 0x1 0x3c 0x0 0x1 0x5c 0x108>;
+		};
+
+		dwiclk: dwiclk@20e080110 {
+			compatible = "hx,pmgr-clk-gate";
+			#clock-cells = <0>;
+			reg = <0x2 0x0e080110 0x0 0x8>;
+			clocks = <&refclk24mhz>;
+			clock-output-names = "dwiclk";
+		};
+
+		touchclk: touchclk@20e078000 {
+			compatible = "hx,pmgr-clk-touch";
+			#clock-cells = <0>;
+			reg = <0x2 0x0e078000 0x0 0x8>;
+			clocks = <&refclk24mhz>;
+			clock-output-names = "touchclk";
+			clock-frequency = <32768>;
+		};
+
+		aic: interrupt-controller@20e100000 {
+			compatible = "hx,aic";
+			#interrupt-cells = <3>;
+			interrupt-controller;
+			reg = <0x2 0x0e100000 0x0 0x8000>;
+		};
+
+		gpio: pinctrl@20f100000 {
+			compatible = "hx,gpio";
+			reg = <0x2 0x0f100000 0x0 0x100000>;
+			pin-count = <224>;
+			interrupts = <0 0x2a 4>, <0 0x2b 4>, <0 0x2c 4>, <0 0x2d 4>,
+				     <0 0x2e 4>, <0 0x2f 4>, <0 0x30 4>;
+			gpio-controller;
+			#gpio-cells = <2>;
+			interrupt-controller;
+			#interrupt-cells = <2>;
+
+			i2c0_pins: i2c0_pins {
+				pins = "gpio197", "gpio196";
+				function = "periph";
+			};
+
+			i2c1_pins: i2c1_pins {
+				pins = "gpio40", "gpio39";
+				function = "periph";
+			};
+
+			i2c2_pins: i2c2_pins {
+				pins = "gpio132", "gpio133";
+				function = "periph";
+			};
+
+			i2c3_pins: i2c3_pins {
+				pins = "gpio41", "gpio42";
+				function = "periph";
+			};
+
+			uart1_pins: uart1_pins {
+				pins = "gpio96", "gpio98";
+				function = "periph";
+			};
+
+			pcie_clkreq_pins: pcie_clkreq_pins {
+				pins = "gpio16", "gpio17", "gpio18", "gpio19";
+				function = "periph";
+			};
+		};
+
+		uart0: serial@20a0c0000 {
+			compatible = "hx,uart";
+			reg = <0x2 0x0a0c0000 0x0 0x4000>;
+			interrupts = <0 0xda 4>;
+			clocks = <&refclk24mhz>;
+			clock-names = "refclk";
+			index = <0>;
+		};
+
+		uart1: serial@20a0c4000 {
+			compatible = "hx,uart";
+			reg = <0x2 0x0a0c4000 0x0 0x4000>;
+			interrupts = <0 0xdb 4>;
+			clocks = <&refclk24mhz>;
+			clock-names = "refclk";
+			index = <1>;
+			pinctrl-0 = <&uart1_pins>;
+			pinctrl-names = "default";
+		};
+
+		uart5: serial@20a0d4000 {
+			compatible = "hx,uart";
+			reg = <0x2 0x0a0d4000 0x0 0x4000>;
+			interrupts = <0 0xdf 4>;
+			clocks = <&refclk24mhz>;
+			clock-names = "refclk";
+			index = <5>;
+		};
+
+		dwi: dwi@20e200000 {
+			compatible = "hx,dwi";
+			reg = <0x2 0x0e200000 0x0 0x4000>;
+			clocks = <&dwiclk>;
+		};
+
+		i2c0: i2c0@20a110000 {
+			compatible = "hx,i2c";
+			reg = <0x2 0x0a110000 0x0 0x1000>;
+			interrupts = <0 0xe8 4>;
+			clocks = <&i2c0clk>;
+			pinctrl-0 = <&i2c0_pins>;
+			pinctrl-names = "default";
+			#address-cells = <1>;
+			#size-cells = <0>;
+		};
+
+		i2c1: i2c1@20a111000 {
+			compatible = "hx,i2c";
+			reg = <0x2 0x0a111000 0x0 0x1000>;
+			interrupts = <0 0xe9 4>;
+			clocks = <&i2c1clk>;
+			pinctrl-0 = <&i2c1_pins>;
+			pinctrl-names = "default";
+			#address-cells = <1>;
+			#size-cells = <0>;
+		};
+
+		i2c2: i2c2@20a112000 {
+			compatible = "hx,i2c";
+			reg = <0x2 0x0a112000 0x0 0x1000>;
+			interrupts = <0 0xea 4>;
+			clocks = <&i2c2clk>;
+			pinctrl-0 = <&i2c2_pins>;
+			pinctrl-names = "default";
+			#address-cells = <1>;
+			#size-cells = <0>;
+		};
+
+		i2c3: i2c3@20a113000 {
+			compatible = "hx,i2c";
+			reg = <0x2 0x0a113000 0x0 0x1000>;
+			interrupts = <0 0xeb 4>;
+			clocks = <&i2c3clk>;
+			pinctrl-0 = <&i2c3_pins>;
+			pinctrl-names = "default";
+			#address-cells = <1>;
+			#size-cells = <0>;
+		};
+
+		spi0: spi@20a080000 {
+			compatible = "hx,spi";
+			reg = <0x2 0x0a080000 0x0 0x4000>;
+			interrupts = <0 0xd6 4>;
+			clocks = <&spi0clk>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+		};
+
+		spi1: spi@20a084000 {
+			compatible = "hx,spi";
+			reg = <0x2 0x0a084000 0x0 0x4000>;
+			interrupts = <0 0xd7 4>;
+			clocks = <&spi1clk>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+		};
+
+		spi2: spi@20a088000 {
+			compatible = "hx,spi";
+			reg = <0x2 0x0a088000 0x0 0x4000>;
+			interrupts = <0 0xd8 4>;
+			clocks = <&spi2clk>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+		};
+
+		spi3: spi@20a08c000 {
+			compatible = "hx,spi";
+			reg = <0x2 0x0a08c000 0x0 0x4000>;
+			interrupts = <0 0xd9 4>;
+			clocks = <&spi3clk>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+		};
+
+		dart_pcie0: dart-pcie0@601008000 {
+			compatible = "hx,dart";
+			reg = <0x6 0x01008000 0x0 0x4000>;
+			interrupts = <0 0x10f 4>;
+			pcie-dart;
+			#iommu-cells = <1>;
+		};
+
+		dart_pcie1: dart-pcie1@602008000 {
+			compatible = "hx,dart";
+			reg = <0x6 0x02008000 0x0 0x4000>;
+			interrupts = <0 0x112 4>;
+			pcie-dart;
+			#iommu-cells = <1>;
+		};
+
+		dart_pcie2: dart-pcie2@603008000 {
+			compatible = "hx,dart";
+			reg = <0x6 0x03008000 0x0 0x4000>;
+			interrupts = <0 0x115 4>;
+			pcie-dart;
+			#iommu-cells = <1>;
+		};
+
+		dart_pcie3: dart-pcie3@604008000 {
+			compatible = "hx,dart";
+			reg = <0x6 0x04008000 0x0 0x4000>;
+			interrupts = <0 0x118 4>;
+			pcie-dart;
+			#iommu-cells = <1>;
+		};
+
+		/*
+		 * PCIe root complex. Port 0 = NVMe, port 1 = Wi-Fi on iPhone 7.
+		 * The board file must supply devpwr-gpios / devpwr-on-* (endpoint
+		 * power rails) and sart-regions, and set status = "okay".
+		 */
+		pcie: pcie@610000000 {
+			compatible = "hx,pcie-h9p";
+			reg = <0x6 0x10000000 0x0 0x1000000>, <0x6 0x00000000 0x0 0x8000>,
+			      <0x6 0x00008000 0x0 0x4000>, <0x6 0x0a000000 0x0 0x40000>,
+			      <0x6 0x01000000 0x0 0x4000>, <0x6 0x02000000 0x0 0x4000>,
+			      <0x6 0x03000000 0x0 0x4000>, <0x6 0x04000000 0x0 0x4000>,
+			      <0x6 0x01004000 0x0 0x4000>;
+			interrupt-parent = <&aic>;
+			interrupts = <0 0x10e 4>, <0 0x111 4>, <0 0x114 4>, <0 0x117 4>,
+				     <0 0x120 1>, <0 0x121 1>, <0 0x122 1>, <0 0x123 1>,
+				     <0 0x124 1>, <0 0x125 1>, <0 0x126 1>, <0 0x127 1>,
+				     <0 0x128 1>, <0 0x129 1>, <0 0x12a 1>, <0 0x12b 1>,
+				     <0 0x12c 1>, <0 0x12d 1>, <0 0x12e 1>, <0 0x12f 1>,
+				     <0 0x130 1>, <0 0x131 1>, <0 0x132 1>, <0 0x133 1>,
+				     <0 0x134 1>, <0 0x135 1>, <0 0x136 1>, <0 0x137 1>,
+				     <0 0x138 1>, <0 0x139 1>, <0 0x13a 1>, <0 0x13b 1>,
+				     <0 0x13c 1>, <0 0x13d 1>, <0 0x13e 1>, <0 0x13f 1>,
+				     <0 0x110 1>;
+			clocks = <&pcieclk>, <&pcieauxclk>, <&pcierefclk>;
+			clock-names = "core", "aux", "ref";
+			pinctrl-0 = <&pcie_clkreq_pins>;
+			pinctrl-names = "default";
+			perst-gpios = <&gpio 12 0>, <&gpio 13 0>, <&gpio 14 0>, <&gpio 15 0>;
+			clkreq-gpios = <&gpio 16 0>, <&gpio 17 0>, <&gpio 18 0>, <&gpio 19 0>;
+			debug-gpios = <&gpio 206 0>;
+			#address-cells = <3>;
+			#size-cells = <2>;
+			#interrupt-cells = <1>;
+			device_type = "pci";
+			msi-controller;
+			msi-parent = <&pcie>;
+			msi-doorbell = <0x0 0xbffff000>;
+			ranges = <0x3000000 0x0 0xc0000000 0x7 0xc0000000 0x0 0x40000000>;
+			bus-range = <0x0 0xf>;
+			iommu-map = <0x000 &dart_pcie0 0x8000 0x100>,
+				    <0x100 &dart_pcie0 0x0000 0x100>,
+				    <0x200 &dart_pcie3 0x0000 0x100>;
+			sart-map = <0x1 0x0 0x0 0x0>;
+			status = "disabled";
+		};
+
+		reboot: reboot@2102b0000 {
+			compatible = "hx,reboot";
+			reg = <0x2 0x102b0000 0x0 0x4000>;
+		};
+	};
+
+	usbcomplex {
+		compatible = "simple-bus";
+		#address-cells = <2>;
+		#size-cells = <2>;
+		dma-ranges = <0x0 0x0 0x8 0x0 0x1 0x0>;
+		ranges;
+
+		/* USB gadget: ethernet at 172.16.1.1 on the host side cable. */
+		usbdev: usbdev@20c100000 {
+			compatible = "hx,usbdev";
+			reg = <0x2 0x0c100000 0x0 0x10000>;
+			interrupts = <0 0xf1 4>;
+			clocks = <&usbdevclk>;
+			clock-names = "otg";
+			hx,dma-remap;
+		};
+	};
+};
